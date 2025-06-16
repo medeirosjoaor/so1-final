@@ -82,7 +82,6 @@ class Robot(mp.Process):
                 return
 
             self.move_npc()
-            time.sleep(0.2)
 
     def tira_da_grid(self, id):
         robot = self.shared_memory["robots"][int(id)]
@@ -95,6 +94,8 @@ class Robot(mp.Process):
         return
 
     def move_npc(self):
+        time.sleep(0.2 * self.shared_memory["robots"][int(self.id)]["V"])
+
         with (
             self.shared_memory["robots_mutex"],
             self.shared_memory["grid_mutex"],
