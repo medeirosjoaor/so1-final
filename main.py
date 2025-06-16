@@ -76,7 +76,14 @@ class Robot(mp.Process):
     
     def move_npc(self):
         with self.shared_memory["robots_mutex"]:
-            if self.shared_memory['robots'][int(self.id)]['status'] == Status.DEAD.value:
+            robot = self.shared_memory["robots"][int(self.id)]
+            if robot["E"] <= 0:
+                                logging.info(
+                                    f"Robô {robot['id']} não tem energia suficiente para se mover."
+                                )
+                                self.tira_da_grid(robot["id"])
+                                return
+            if robot['status'] == Status.DEAD.value:
                 logging.info(f"Robô {self.id} está morto e não pode se mover!")
                 return
             logging.info(f"Robô {self.id} adquiriu o robots_mutex! Função MOVE_NPC")
@@ -91,14 +98,12 @@ class Robot(mp.Process):
                     (0, 1),
                 ]  # cima, baixo, esquerda, direita
                 random.shuffle(direcoes)  # embaralha para escolher aleatoriamente
+                moved = False
                 for di , dj in direcoes:
-                    robot = self.shared_memory["robots"][int(self.id)]
                     new_i = robot["i"] + di
                     new_j = robot["j"] + dj
                     if 0 <= new_i < GRID_SIZE[0] and 0 <= new_j < GRID_SIZE[1]:
-                            logging.info(f"Robô {self.id} adquiriu o grid_mutex! Na função MOVE_NPC")
                             tmp_i, tmp_j = robot["i"], robot["j"]
-                            
                             cell = self.shared_memory["grid"][new_i][new_j]
                             if cell == "#":
                                 logging.info(
@@ -106,15 +111,7 @@ class Robot(mp.Process):
                                 )
                                 continue
                             
-                            if robot["E"] <= 0:
-                                logging.info(
-                                    f"Robô {robot['id']} não tem energia suficiente para se mover."
-                                )
-                                self.tira_da_grid(robot["id"])
-                                return
-                            
                             robot["E"] -= 1  # Consome energia ao mover
-                            
                             robot["i"] = new_i
                             robot["j"] = new_j
                             self.shared_memory["grid"][new_i][new_j] = robot["id"]
@@ -124,13 +121,19 @@ class Robot(mp.Process):
                                     f"Robô {robot['id']} se moveu para ({robot['i']}, {robot["j"]}) e encontrou uma célula de recarga!"
                                 )
                                 self.pega_energia()
-                                return
+                                
                             else:
                                 logging.info(
                             f"NPC {robot['id']}  se moveu para ({new_i}, {new_j} está com {robot['E']} de energia e liberou robots_mutex e grid_mutex)!")
                                 self.esta_proximo()
-                            return
-        logging.info(f"Robo {self.id} tem todas direções bloqueadas ou não pode se mover!")
+                            moved = True
+                            break
+                if not moved:
+                    logging.info(
+                        f"Robô {self.id} não conseguiu se mover em nenhuma direção!"
+                    )
+                        
+        
 
        
      
