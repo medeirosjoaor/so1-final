@@ -5,6 +5,7 @@ import random
 import time
 from enum import Enum
 from multiprocessing.managers import DictProxy, SyncManager
+from contextlib import contextmanager 
 
 GRID_SIZE = (40, 20)
 CHUNK_SIZE = (5, 5)
@@ -14,6 +15,17 @@ class Status(Enum):
     ALIVE = 0
     DEAD = 1
 
+@contextmanager
+def lock_com_timeout(lock, timeout=1.0, robot_id=None):
+    result = lock.acquire(timeout=timeout)
+    if not result and robot_id:
+        logging.warning(f"Robô {robot_id} falhou ao adquirir lock após {timeout} segundos - liberando recursos")
+        raise TimeoutError(f"Robô {robot_id} não conseguiu adquirir o lock")
+    try:
+        yield
+    finally:
+        if result:
+            lock.release()
 
 class Viewer(mp.Process):
     def __init__(self, shared_memory: DictProxy) -> None:
@@ -23,7 +35,7 @@ class Viewer(mp.Process):
         self.shared_memory = shared_memory
 
     def run(self) -> None:
-        while True:
+        while self.shared_memory["emergency_stop"].value == 0:
             if self.shared_memory["flags"]["init_done"]:
                 cols = []
 
@@ -56,15 +68,31 @@ class Robot(mp.Process):
         self.id = id
         self.shared_memory = shared_memory
         self.manager = manager
+        self.battery_mutex = manager.Lock()
 
     def run(self) -> None:
         if not self.shared_memory["flags"]["init_done"]:
             self.generate_grid(self.shared_memory, self.manager)  # type: ignore
+        #Verifica se deve causar deadlock
+        if self.shared_memory["causar_deadlock"].value == 1: 
+            try: 
+                self.cria_deadlock()
+            except TimeoutError: 
+                self.shared_memory["emergency_stop"].value = 1
+                return 
         logging.info(
             f"Robô {self.id} iniciou com os dados {self.shared_memory['robots'][int(self.id)]} e está rodando!"
         )
-
-        while True:
+        if self.shared_memory["causar_deadlock"].value == 2: 
+            try: 
+                self.cenario_deadlock()
+            except TimeoutError: 
+                self.shared_memory["emergency_stop"].value = 1
+                return 
+        logging.info(
+            f"Robô {self.id} iniciou com os dados {self.shared_memory['robots'][int(self.id)]} e está rodando!"
+        )
+        while self.shared_memory["emergency_stop"].value == 0:
             if (
                 self.shared_memory["robots"][int(self.id)]["status"]
                 == Status.DEAD.value
@@ -353,6 +381,54 @@ class Robot(mp.Process):
 
             logging.info(f"Robô {self.id} liberou o grid_mutex!")
 
+    def cenario_deadlock(self):
+        """Cenário de deadlock com prevenção usando lock_com_timeout"""
+        robot_id = int(self.id)
+        logging.info(f"Robô {robot_id} iniciando sequência que pode causar deadlock")
+        
+        if robot_id == 1:
+            try:
+                with lock_com_timeout(self.battery_mutex, timeout=2, robot_id=robot_id):
+                    logging.info(f"Robô {robot_id} adquiriu battery_mutex")
+                    time.sleep(1)
+                    
+                    with lock_com_timeout(self.shared_memory["grid_mutex"], timeout=1, robot_id=robot_id):
+                        logging.info(f"Robô {robot_id} adquiriu grid_mutex (DEADLOCK EVITADO)")
+                        time.sleep(0.5)
+            except TimeoutError:
+                logging.warning(f"Robô {robot_id} detectou possível deadlock, abortando operação")
+                return
+                
+        elif robot_id == 2:
+            try:
+                with lock_com_timeout(self.shared_memory["grid_mutex"], timeout=2, robot_id=robot_id):
+                    logging.info(f"Robô {robot_id} adquiriu grid_mutex")
+                    time.sleep(1)
+                    
+                    with lock_com_timeout(self.battery_mutex, timeout=1, robot_id=robot_id):
+                        logging.info(f"Robô {robot_id} adquiriu battery_mutex (DEADLOCK EVITADO)")
+                        time.sleep(0.5)
+            except TimeoutError:
+                logging.warning(f"Robô {robot_id} detectou possível deadlock, abortando operação")
+                return
+
+    def cria_deadlock(self):
+        """Método que realmente cria o deadlock (para demonstração)"""
+        robot_id = int(self.id)
+        if robot_id == 1:
+            self.battery_mutex.acquire()
+            logging.info(f"Robô {robot_id} adquiriu battery_mutex (DEADLOCK)")
+            time.sleep(2)
+            self.shared_memory["grid_mutex"].acquire()
+            logging.info(f"Robô {robot_id} adquiriu grid_mutex (NUNCA SERÁ EXECUTADO)")
+            
+        elif robot_id == 2:
+            self.shared_memory["grid_mutex"].acquire()
+            logging.info(f"Robô {robot_id} adquiriu grid_mutex (DEADLOCK)")
+            time.sleep(2)
+            self.battery_mutex.acquire()
+            logging.info(f"Robô {robot_id} adquiriu battery_mutex (NUNCA SERÁ EXECUTADO)")
+
 
 def clear_terminal():
     """Limpa o terminal."""
@@ -370,6 +446,8 @@ def main() -> None:
         level=logging.INFO,
     )
 
+    deadlock = int(input("Causar deadlock?\n0-Não\n1-Sim(sem timeout)\n2-Sim(com timeout)\n "))
+
     with SyncManager() as manager:
         shared_memory = manager.dict(
             grid=manager.list(),
@@ -378,6 +456,8 @@ def main() -> None:
             robots_mutex=manager.Lock(),
             flags=manager.dict({"init_done": False, "vencedor": None}),
             alive=4,
+            causar_deadlock=manager.Value('i', deadlock),
+            emergency_stop=manager.Value('i', 0),
         )
 
         # Cria a lista de dicionários de robo
@@ -405,7 +485,15 @@ def main() -> None:
         for robot in robots:
             robot.start()
         viewer.start()
-
+        
+        while True:
+            if shared_memory["emergency_stop"].value == 1:
+                for robot in robots:
+                    robot.terminate()  # Força a parada
+                viewer.terminate()
+                break
+            time.sleep(0.1)
+        
         for robot in robots:
             robot.join()
         viewer.join()
